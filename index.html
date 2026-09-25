@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111111" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Tap to Hear — Web POC</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color-scheme: light dark; }
+    body { margin: 0; background: #111; color: #fff; min-height: 100vh; }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 28px 18px 60px; }
+    h1 { font-size: 2rem; margin: 0 0 8px; }
+    .sub { color: #bbb; margin-bottom: 24px; }
+    .card { background: #1d1d1f; border-radius: 18px; padding: 18px; margin: 14px 0; }
+    button, .button {
+      width: 100%; box-sizing: border-box; border: 0; border-radius: 14px;
+      padding: 14px 16px; font-size: 1rem; font-weight: 700; margin-top: 10px;
+      background: #fff; color: #111; text-align: center; text-decoration: none; display: block;
+    }
+    button.secondary { background: #2c2c2e; color: #fff; }
+    button.danger { background: #ff453a; color: #fff; }
+    button:disabled { opacity: .45; }
+    .status { font-size: .95rem; color: #bbb; margin-top: 12px; min-height: 1.3em; }
+    .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; word-break: break-all; color: #aaa; }
+    input[type=text] {
+      width: 100%; box-sizing: border-box; padding: 12px; border-radius: 12px;
+      border: 1px solid #444; background: #111; color: #fff; font-size: .9rem;
+    }
+    audio { width: 100%; margin-top: 12px; }
+    .big { font-size: 3rem; text-align: center; margin: 10px 0; }
+    .hidden { display: none !important; }
+    .ok { color: #30d158; }
+    .warn { color: #ffd60a; }
+    .small { font-size: .82rem; color: #999; line-height: 1.45; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div id="creatorView">
+    <div class="big">🎙️</div>
+    <h1>Tap to Hear</h1>
+    <div class="sub">Web proof of concept</div>
+
+    <div class="card">
+      <strong>1. Record a memory</strong>
+      <button id="recordBtn">Start recording</button>
+      <div class="status" id="recordStatus">Ready.</div>
+      <audio id="preview" controls class="hidden"></audio>
+    </div>
+
+    <div class="card">
+      <strong>2. Save it</strong>
+      <button id="saveBtn" disabled>Save recording</button>
+      <div class="status" id="saveStatus">Record something first.</div>
+    </div>
+
+    <div class="card">
+      <strong>3. Program the NFC tag</strong>
+      <p class="small">After saving, copy the memory link below. Write that URL to your NTAG215 using NFC Tools.</p>
+      <input id="memoryUrl" type="text" readonly placeholder="Your memory link will appear here" />
+      <button id="copyBtn" class="secondary" disabled>Copy memory link</button>
+      <a id="openBtn" class="button hidden" href="#">Open memory page</a>
+      <div class="status" id="urlStatus"></div>
+    </div>
+
+    <div class="card">
+      <strong>Important POC limitation</strong>
+      <p class="small">
+        This version stores the audio in Safari on this iPhone using IndexedDB.
+        The NFC link will work on this same iPhone/browser profile. It will not work on another phone yet.
+        Cloud storage comes in the next version.
+      </p>
+    </div>
+  </div>
+
+  <div id="memoryView" class="hidden">
+    <div class="big">🔊</div>
+    <h1>Tap to Hear</h1>
+    <div class="sub">Memory playback</div>
+
+    <div class="card">
+      <strong>Your recording</strong>
+      <audio id="memoryPlayer" controls></audio>
+      <div class="status" id="memoryStatus">Loading…</div>
+      <div class="id" id="memoryId"></div>
+    </div>
+
+    <div class="card">
+      <a class="button" href="./">Create another recording</a>
+    </div>
+  </div>
+</div>
+
+<script>
+const DB_NAME = "taptohear-poc";
+const STORE = "memories";
+let recorder = null;
+let chunks = [];
+let currentBlob = null;
+
+function uuid() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15;
+    const v = c === "x" ? r : (r & 3) | 8;
+    return v.toString(16);
+  });
+}
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function putMemory(id, blob) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put({ blob, createdAt: Date.now() }, id);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getMemory(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function chooseMimeType() {
+  const candidates = [
+    "audio/mp4",
+    "audio/webm;codecs=opus",
+    "audio/webm"
+  ];
+  return candidates.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || "";
+}
+
+async function startRecording() {
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    document.querySelector("#recordStatus").textContent = "This browser does not support recording.";
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    chunks = [];
+    const mimeType = chooseMimeType();
+    recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+    recorder.ondataavailable = e => {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      currentBlob = new Blob(chunks, { type: recorder.mimeType || "audio/mp4" });
+      const preview = document.querySelector("#preview");
+      preview.src = URL.createObjectURL(currentBlob);
+      preview.classList.remove("hidden");
+      document.querySelector("#saveBtn").disabled = false;
+      document.querySelector("#recordStatus").textContent = "Recording stopped. Preview it below.";
+      stream.getTracks().forEach(t => t.stop());
+    };
+
+    recorder.start();
+    document.querySelector("#recordBtn").textContent = "Stop recording";
+    document.querySelector("#recordBtn").classList.add("danger");
+    document.querySelector("#recordStatus").textContent = "Recording…";
+  } catch (err) {
+    document.querySelector("#recordStatus").textContent = "Microphone error: " + err.message;
+  }
+}
+
+function stopRecording() {
+  if (recorder && recorder.state === "recording") {
+    recorder.stop();
+    document.querySelector("#recordBtn").textContent = "Start recording";
+    document.querySelector("#recordBtn").classList.remove("danger");
+  }
+}
+
+document.querySelector("#recordBtn").addEventListener("click", () => {
+  if (recorder && recorder.state === "recording") stopRecording();
+  else startRecording();
+});
+
+document.querySelector("#saveBtn").addEventListener("click", async () => {
+  if (!currentBlob) return;
+  const id = uuid();
+
+  try {
+    await putMemory(id, currentBlob);
+    const base = location.href.split("?")[0].split("#")[0];
+    const url = base + "?m=" + encodeURIComponent(id);
+
+    document.querySelector("#memoryUrl").value = url;
+    document.querySelector("#copyBtn").disabled = false;
+    document.querySelector("#openBtn").href = url;
+    document.querySelector("#openBtn").classList.remove("hidden");
+    document.querySelector("#saveStatus").innerHTML = '<span class="ok">Saved on this iPhone.</span>';
+    document.querySelector("#urlStatus").textContent = "Now write this URL to the NFC tag.";
+  } catch (err) {
+    document.querySelector("#saveStatus").textContent = "Save error: " + err.message;
+  }
+});
+
+document.querySelector("#copyBtn").addEventListener("click", async () => {
+  const value = document.querySelector("#memoryUrl").value;
+  try {
+    await navigator.clipboard.writeText(value);
+    document.querySelector("#urlStatus").innerHTML = '<span class="ok">Copied.</span>';
+  } catch {
+    const input = document.querySelector("#memoryUrl");
+    input.focus();
+    input.select();
+    document.execCommand("copy");
+    document.querySelector("#urlStatus").innerHTML = '<span class="ok">Copied.</span>';
+  }
+});
+
+async function showMemory(id) {
+  document.querySelector("#creatorView").classList.add("hidden");
+  document.querySelector("#memoryView").classList.remove("hidden");
+  document.querySelector("#memoryId").textContent = "Memory ID: " + id;
+
+  try {
+    const item = await getMemory(id);
+    if (!item?.blob) {
+      document.querySelector("#memoryStatus").innerHTML =
+        '<span class="warn">This memory is not stored on this iPhone yet.</span>';
+      return;
+    }
+    const player = document.querySelector("#memoryPlayer");
+    player.src = URL.createObjectURL(item.blob);
+    document.querySelector("#memoryStatus").textContent = "Ready. Tap play.";
+  } catch (err) {
+    document.querySelector("#memoryStatus").textContent = "Load error: " + err.message;
+  }
+}
+
+const params = new URLSearchParams(location.search);
+const memoryId = params.get("m");
+if (memoryId) showMemory(memoryId);
+</script>
+</body>
+</html>
